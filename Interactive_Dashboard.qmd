@@ -1,0 +1,285 @@
+---
+title: "Interactive Communication ________"
+author:
+  - name: Group 3 (Minkyung Kim, Kelvin Xiao, Pamela P. Herrera V., Zhongda Li)
+    role: "Student"
+    affiliations:
+      - name: Columbia University
+  - name: Dr. Scott Spencer
+    role: "Professor"
+    email: sas2375@columbia.edu
+    affiliations:
+      - name: Columbia University
+date: last-modified
+date-format: long
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-link: true
+    theme:
+      light: flatly
+      dark: darkly
+    embed-resources: true
+execute:
+  eval: true
+  warning: false
+  message: false
+  error: false
+  echo: true
+---
+
+
+```{r setup, include=FALSE}
+# app.R
+
+library(shiny)
+library(tidyverse)
+library(tigris)      # U.S. state boundaries
+library(sf)          # spatial data
+library(leaflet)
+library(plotly)
+library(scales)
+library(dplyr)
+
+options(tigris_use_cache = TRUE)
+
+# ── RAW DATA & PREP ────────────────────────────────────────────────────────
+
+ins_raw <- read_csv("insurance_data.csv", show_col_types = FALSE) %>%
+  mutate(
+    State = if_else(
+      nchar(State) > 2,
+      state.abb[match(State, state.name)],
+      State
+    ),
+    Denial_Rate = as.numeric(Denial_Rate)
+  ) %>%
+  select(State, Issuer_Name, Denial_Rate)
+
+ins_summary <- ins_raw %>%
+  group_by(State) %>%
+  summarise(Denial_Rate = mean(Denial_Rate, na.rm = TRUE), .groups = "drop")
+
+hca <- tribble(
+  ~State, ~num_hospitals,
+  "TX",76, "FL",51, "TN",20, "VA",17,
+  "CO",11, "NC",11, "UT",10, "CA",9,
+  "KS",8,  "SC",7,  "GA",6,  "MO",6,
+  "NV",5,  "NH",3,  "ID",2,  "KY",2,
+  "LA",2,  "AK",1,  "IN",1
+) %>% mutate(State = as.character(State))
+
+state_df <- ins_summary %>%
+  left_join(hca, by = "State") %>%
+  mutate(
+    num_hospitals = replace_na(num_hospitals, 0),
+    hca_flag      = num_hospitals > 0
+  )
+
+states_sf <- states(cb = TRUE, class = "sf") %>%
+  left_join(state_df, by = c("STUSPS" = "State")) %>%
+  filter(!is.na(Denial_Rate))
+
+states_sf <- states_sf %>%
+  mutate(
+    tooltip = sprintf(
+      "<strong>%s</strong><br/>\n       Denial Rate: %.2f%%<br/>\n       HCA Hospitals: %d",
+      NAME,
+      Denial_Rate,
+      num_hospitals
+    ) %>% lapply(htmltools::HTML)
+  )
+
+pal <- colorNumeric("YlOrRd", domain = states_sf$Denial_Rate, na.color = "transparent")
+
+# ── UI ─────────────────────────────────────────────────────────────────────
+
+ui <- fluidPage(
+  tags$head(
+    tags$style(HTML("\n      .irs-bar {background: linear-gradient(to right, #ffffb2, #bd0026) !important;}\n      .irs-bar-edge, .irs-line {background: transparent !important;}\n    "))
+  ),
+
+  tags$h1("Navigating Insurance Denials: Regional Insights for Strategic Partnerships & Patient Retention"),
+  tags$h3(
+    HTML(
+      "Identify denial trends that impact patient satisfaction and retention. ",
+      "Use this map to uncover regional marketing opportunities and to focus on ",
+      "strategic partnerships with noticeably ",
+      "<span style='color:#FC8D59;font-weight:bold;'>low</span>",
+      " / ",
+      "<span style='color:#D73027;font-weight:bold;'>high</span>",
+      " denial rate issuers."
+    ),
+    style = "font-size:18px; line-height:1.2;"
+  ),
+  tags$p(
+    "This interactive map displays state-level insurance denial rates—lighter colors mean fewer denials, darker colors mean more—overlaid with HCA hospital locations."
+  ),
+  br(),
+
+  tags$h4("Exploratory Questions:"),
+  tags$ul(
+    tags$li(tags$strong("Q1: Which HCA-covered states combine high denial rates with the largest hospital footprints?")),
+    tags$li(tags$strong("Q2: Within a selected state, which issuers exhibit the lowest or highest average denial rate?"))
+  ),
+  br(),
+
+  tags$h4("How to explore:"),
+  tags$ul(
+    tags$li(tags$strong("Hover over a state"), "to see its denial rate and number of HCA Hospitals, highlighting areas where states showing higher denial rates pose a greater risk on patient satisfaction and retention."),
+    tags$li(tags$strong("Use the checkbox"), "to toggle between HCA-covered and all states for comparison."),
+    tags$li(tags$strong("Adjust the slider"), "in the top-right to focus on your desired denial rate range."),
+    tags$li(tags$strong("Click a state"), "to reveal its insurers ordered from lowest to highest denial rates, highlighting which companies to prioritize for partnerships.")
+  ),
+  br(),
+
+  tags$div(
+    style = "border:1px solid #ddd; padding:10px; margin-bottom:20px; background:#f9f9f9;",
+    tags$h4("Key Focus Point:"),
+    tags$p(
+      "Use these insights to focus your communication, hospital branding, and relationship management campaign efforts on insurer partnerships in the regions that will drive the largest gains in patient satisfaction, reinforce positive brand reputation, and long-term revenue recovery."
+    ),
+    tags$p(
+      HTML(
+        "<strong>Alaska</strong>, <strong>Texas</strong>, and <strong>Indiana</strong> show high denial rates compared to other states under HCA coverage. ",
+        "<span style='color:#D73027; font-weight:bold;'>Texas</span> contains the greatest number of our hospitals ",
+        "(<strong>76</strong>), indicating that targeted communication and proactive patient engagement campaigns there will yield the biggest returns."
+      )
+    )
+  ),
+
+  fluidRow(
+    column(4,
+      checkboxInput("hca_only", "Show only states under HCA coverage", FALSE)
+    ),
+    column(8)
+  ),
+  br(),
+
+  div(style = "position:relative;",
+      leafletOutput("denial_map", height = 500),
+      absolutePanel(
+        top       = 10,
+        right     = 10,
+        width     = 280,
+        sliderInput(
+          "denial_range", "Denial Rate (%)",
+          min   = 0, max = 0.4,
+          value = c(0, 0.4),
+          step  = 0.01
+        )
+      )
+  ),
+
+  tags$caption("Figure 1: Choropleth of denial rates; tooltip shows HCA hospital count & Denial rate."),
+  tags$div(
+    style = "margin-top:4px; font-size:12px; color:#555;",
+    tags$em("Data Source: KFF analysis of CMS Transparency in Coverage data for 2023 plan year. States without information do not use HealthCare.gov so are not included in this analysis.")
+  ),
+  br(), br(),
+
+  plotlyOutput("issuer_bar", height = 300),
+  tags$caption("Figure 2: Top 10 issuers by average denial rate in the selected state."),
+  tags$div(
+    style = "margin-top:4px; font-size:12px; color:#555;",
+    tags$em("Data Source: KFF analysis of CMS Transparency in Coverage data for 2023 plan year.")
+  )
+)
+
+# ── SERVER ─────────────────────────────────────────────────────────────────
+
+server <- function(input, output, session) {
+
+  reactive_sf <- reactive({
+    states_sf %>%
+      filter(
+        (!input$hca_only | hca_flag),
+        Denial_Rate >= input$denial_range[1],
+        Denial_Rate <= input$denial_range[2]
+      )
+  })
+
+  output$denial_map <- renderLeaflet({
+    leaflet(reactive_sf()) %>%
+      addProviderTiles(providers$Esri.OceanBasemap, options = providerTileOptions(noWrap = TRUE)) %>%
+      addProviderTiles(providers$CartoDB.Positron, options = providerTileOptions(opacity = 0.7, noWrap = TRUE)) %>%
+      setView(-96, 37.8, 4) %>%
+      addPolygons(
+        layerId         = ~STUSPS,
+        fillColor       = ~pal(Denial_Rate),
+        color           = "white",
+        weight          = 1,
+        fillOpacity     = 0.8,
+        highlightOptions = highlightOptions(weight = 2, color = "black", fillOpacity = 1),
+        label           = ~tooltip
+      )
+  })
+
+  output$issuer_bar <- renderPlotly({
+    click <- input$denial_map_shape_click
+    req(click$id)
+    state_clicked <- as.character(click$id)
+
+    # filter and summarize insurers for the clicked state
+    df <- ins_raw %>%
+      filter(State == state_clicked) %>%
+      group_by(Issuer_Name) %>%
+      summarise(Avg_Denial = mean(Denial_Rate, na.rm = TRUE), .groups = "drop") %>%
+      arrange(desc(Avg_Denial)) %>%
+      slice_head(n = 10) %>%
+      mutate(Issuer_Name = factor(Issuer_Name, levels = Issuer_Name))
+
+    # handle no-data case
+    if (nrow(df) == 0) {
+      return(
+        plotly_empty(type = "bar") %>%
+        layout(title = list(text = paste("No insurer data for", state_clicked)))
+      )
+    }
+
+    hi <- max(df$Avg_Denial, na.rm = TRUE)
+    lo <- min(df$Avg_Denial, na.rm = TRUE)
+    cols <- ifelse(df$Avg_Denial == hi,  "#D73027",
+           ifelse(df$Avg_Denial == lo, "#FEE08B", "#FC8D59"))
+    labs <- sprintf("%.2f%%", df$Avg_Denial)
+    labs[df$Avg_Denial %in% c(hi, lo)] <- paste0("<b>", labs[df$Avg_Denial %in% c(hi, lo)], "</b>")
+    tick_texts <- as.character(df$Issuer_Name)
+    tick_texts[df$Avg_Denial %in% c(hi, lo)] <- paste0("<b>", tick_texts[df$Avg_Denial %in% c(hi, lo)], "</b>")
+
+    plot_ly(
+      df,
+      x            = ~Avg_Denial,
+      y            = ~Issuer_Name,
+      type         = "bar",
+      orientation  = "h",
+      hoverinfo    = "none",
+      text         = labs,
+      textposition = "auto",
+      marker       = list(color = cols)
+    ) %>%
+      layout(
+        title = list(text = paste("Top Issuers in", state_clicked)),
+        xaxis = list(title = "Average Denial Rate (%)"),
+        yaxis = list(
+          title     = "",
+          automargin= TRUE,
+          tickmode  = "array",
+          tickvals  = df$Issuer_Name,
+          ticktext  = tick_texts
+        )
+      )
+  })
+}
+
+# ── RUN ────────────────────────────────────────────────────────────────────
+
+shinyApp(ui, server)
+
+```
